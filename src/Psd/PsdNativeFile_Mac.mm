@@ -124,7 +124,8 @@ File::ReadOperation NativeFile::DoRead(void* buffer, uint32_t count, uint64_t po
         dispatch_data_apply(data, ^bool(dispatch_data_t  _Nonnull region, size_t offset, const void * _Nonnull buffer, size_t size)
             {
             // TODO: make sure this doesn't get called because PSD file is loaded as multiple data regions
-                memcpy(operation->dataReadBuffer, buffer, size);
+                memcpy(static_cast<uint8_t *>(operation->dataReadBuffer) + offset,
+                       buffer, size);
                 dispatch_semaphore_signal(operation->semaphore);
                 return true;
             });
