@@ -1,5 +1,5 @@
 //
-//  PsdNativeFile_Mac.mm
+//  PsdNativeFile_Mac.cpp
 //  Contributed to psd_sdk
 //
 //  Created by Oluseyi Sonaiya on 3/29/20.
@@ -12,6 +12,8 @@
 #include <codecvt>
 #include <locale>
 #include <string>
+#include <unistd.h>
+#include <fcntl.h>
 
 #include "PsdPch.h"
 #include "PsdNativeFile_Mac.h"
@@ -25,25 +27,18 @@
 
 PSD_NAMESPACE_BEGIN
 
-typedef void (^DispatchIOHandler)(dispatch_data_t data, int error);
-
 struct DispatchReadOperation
 {
     void* dataReadBuffer;
     uint32_t length;
     uint64_t offset;
-    DispatchIOHandler ioHandler;
-    dispatch_semaphore_t semaphore;
 };
 
 struct DispatchWriteOperation
 {
-    dispatch_data_t dataToWrite;
-    size_t bytesWritten;
+    const void* dataToWrite;
     uint32_t length;
     uint64_t offset;
-    DispatchIOHandler ioHandler;
-    dispatch_semaphore_t semaphore;
 };
 
 
@@ -119,23 +114,6 @@ File::ReadOperation NativeFile::DoRead(void* buffer, uint32_t count, uint64_t po
     operation->dataReadBuffer = buffer;
     operation->length = count;
     operation->offset = position;
-    operation->ioHandler = ^(dispatch_data_t data, int error)
-    {
-        dispatch_data_apply(data, ^bool(dispatch_data_t  _Nonnull region, size_t offset, const void * _Nonnull buffer, size_t size)
-            {
-            // TODO: make sure this doesn't get called because PSD file is loaded as multiple data regions
-                memcpy(static_cast<uint8_t *>(operation->dataReadBuffer) + offset,
-                       buffer, size);
-                dispatch_semaphore_signal(operation->semaphore);
-                return true;
-            });
-
-        size_t bytesRead = dispatch_data_get_size(data);
-        if (bytesRead < operation->length)
-        {
-            PSD_ERROR("NativeFile", "Cannot read %u bytes from file position %" PRIu64 " asynchronously.", count, position);
-        }
-    };
     return static_cast<File::ReadOperation>(operation);
 }
 
@@ -144,17 +122,13 @@ File::ReadOperation NativeFile::DoRead(void* buffer, uint32_t count, uint64_t po
 // ---------------------------------------------------------------------------------------------------------------------
 bool NativeFile::DoWaitForRead(File::ReadOperation& operation)
 {
-    dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
-    
     DispatchReadOperation *op = static_cast<DispatchReadOperation *>(operation);
     lseek(m_fileDescriptor, op->offset, SEEK_SET);
-    op->semaphore = dispatch_semaphore_create(0);
-    dispatch_read(m_fileDescriptor, op->length, queue, op->ioHandler);
+    const ssize_t nbytes = read(m_fileDescriptor, op->dataReadBuffer, op->length);
     
-    dispatch_semaphore_wait(op->semaphore, DISPATCH_TIME_FOREVER);
-    if (op->dataReadBuffer == nil)
+    if (nbytes < op->length)
     {
-        PSD_ERROR("NativeFile", "Failed to wait for previous asynchronous read operation.");
+        PSD_ERROR("NativeFile", "Failed to read required number of bytes.");
         return false;
     }
 
@@ -166,24 +140,10 @@ bool NativeFile::DoWaitForRead(File::ReadOperation& operation)
 // ---------------------------------------------------------------------------------------------------------------------
 File::WriteOperation NativeFile::DoWrite(const void* buffer, uint32_t count, uint64_t position)
 {
-    dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
-
     DispatchWriteOperation *operation = memoryUtil::Allocate<DispatchWriteOperation>(m_allocator);
     operation->length = count;
     operation->offset = position;
-    operation->dataToWrite = dispatch_data_create(buffer, count, queue, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-    operation->ioHandler = ^(dispatch_data_t d, int error)
-    {
-        if (d != NULL || error != 0 )
-        {
-            PSD_ERROR("NativeFile", "Cannot write %u bytes to file position %" PRIu64 " asynchronously.", count, position);
-        }
-        else
-        {
-            operation->bytesWritten = operation->length;
-        }
-        dispatch_semaphore_signal(operation->semaphore);
-    };
+    operation->dataToWrite = buffer;
     return static_cast<File::ReadOperation>(operation);
 }
 
@@ -192,17 +152,13 @@ File::WriteOperation NativeFile::DoWrite(const void* buffer, uint32_t count, uin
 // ---------------------------------------------------------------------------------------------------------------------
 bool NativeFile::DoWaitForWrite(File::WriteOperation& operation)
 {
-    dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
-    
     DispatchWriteOperation *op = static_cast<DispatchWriteOperation *>(operation);
     lseek(m_fileDescriptor, op->offset, SEEK_SET);
-    op->semaphore = dispatch_semaphore_create(0);
-    dispatch_write(m_fileDescriptor, op->dataToWrite, queue, op->ioHandler);
+    const ssize_t nbytes = write(m_fileDescriptor, op->dataToWrite, op->length);
     
-    dispatch_semaphore_wait(op->semaphore, DISPATCH_TIME_FOREVER);
-    if (op->bytesWritten < op->length)
+    if (nbytes < op->length)
     {
-        PSD_ERROR("NativeFile", "Failed to wait for previous asynchronous write operation.");
+        PSD_ERROR("NativeFile", "Failed to write required number of bytes.");
         return false;
     }
 
